@@ -8,11 +8,30 @@ from typing import Any, Optional
 
 import torch
 
+# Use non-weights-only loading for PyTorch 2.6+ to avoid safe-global strict unpickling issues for model checkpoints.
+_original_torch_load = torch.load
+
+def _torch_load_with_fallback(*args, **kwargs):
+    # Force non-weights_only loading to support pickle objects requiring class constructors.
+    kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+
+torch.load = _torch_load_with_fallback
+
 try:
     import omegaconf
+    import collections
+
     torch.serialization.add_safe_globals([
         omegaconf.listconfig.ListConfig,
         omegaconf.base.ContainerMetadata,
+        omegaconf.base.Metadata,
+        omegaconf.nodes.AnyNode,
+        torch.torch_version.TorchVersion,
+        # pyannote-specific
+        getattr(__import__('pyannote.audio.core.model', fromlist=['Introspection']), 'Introspection'),
+        getattr(__import__('pyannote.audio.core.task', fromlist=['Specifications']), 'Specifications'),
+        getattr(__import__('pyannote.audio.core.task', fromlist=['Problem']), 'Problem'),
         (Any, "typing.Any"),
         (list, "builtins.list"),
         (dict, "builtins.dict"),
@@ -22,6 +41,7 @@ try:
         (int, "builtins.int"),
         (float, "builtins.float"),
         (bool, "builtins.bool"),
+        (collections.defaultdict, "collections.defaultdict"),
     ])
 except Exception:
     pass
@@ -30,8 +50,10 @@ import whisper
 
 try:
     import whisperx
+    from whisperx.diarize import DiarizationPipeline
 except ImportError:  # pragma: no cover
     whisperx = None
+    DiarizationPipeline = None
 
 
 def extract_audio(input_path: Path, output_path: Path):
@@ -128,7 +150,13 @@ def transcribe_with_diarization(input_path: Path, model_name: str, hf_token: Opt
                 "Diarization requires a Hugging Face token. Pass --hf-token or set HUGGINGFACE_TOKEN."
             )
 
-        diarize_model = whisperx.DiarizationPipeline(token=hf_token, device=device)
+        if DiarizationPipeline is None:
+            raise ImportError(
+                "whisperx.diarize.DiarizationPipeline is required for diarization. "
+                "Install/upgrade whisperx and retry."
+            )
+
+        diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
         diarize_segments = diarize_model(audio, min_speakers=min_speakers, max_speakers=max_speakers)
         result = whisperx.assign_word_speakers(diarize_segments, result)
 
